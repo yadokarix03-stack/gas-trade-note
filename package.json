@@ -1,0 +1,6 @@
+{
+  "name": "gas-trade-note",
+  "private": true,
+  "scripts": { "push": "clasp push", "deployments": "clasp deployments" },
+  "devDependencies": { "@google/clasp": "^3.0.6-alpha" }
+}
