@@ -3,7 +3,7 @@ const APP = Object.freeze({
   propertyKey: 'TRADE_NOTE_SPREADSHEET_ID',
   sheets: {
     trades: { name: 'Trades', headers: ['ID','種別','日付','銘柄コード','銘柄名','数量','単価','平均取得単価','利確目標','売却元ID','実現損益','備考','作成日時','更新日時'] },
-    stocks: { name: 'Stocks', headers: ['ID','銘柄コード','銘柄名','購入目標値','現在値','年初来高値','年初来安値','取得日時','備考','作成日時','更新日時'] },
+    stocks: { name: 'Stocks', headers: ['ID','銘柄コード','銘柄名','購入目標値','現在値','年初来高値','年初来安値','取得日時','備考','作成日時','更新日時','利確目標','決算情報','決算取得日時'] },
     policies: { name: 'Policies', headers: ['ID','日付','鉄のおきて','常に上位','作成日時','更新日時'] },
     favorites: { name: 'Favorites', headers: ['ID','銘柄コード','銘柄名','市場','業種','投資理由','注目材料','リスク','目標株価','メモ','作成日時','更新日時'] }
   }
@@ -88,9 +88,11 @@ function saveStock(input) {
   validateRequired_(input, ['symbol','name']);
   upsert_('stocks', input.id, {
     '銘柄コード': clean_(input.symbol).toUpperCase(), '銘柄名': clean_(input.name),
-    '購入目標値': numberOrBlank_(input.buyTarget), '現在値': numberOrBlank_(input.currentPrice),
+    '購入目標値': numberListForCell_(input.buyTargets), '現在値': numberOrBlank_(input.currentPrice),
     '年初来高値': numberOrBlank_(input.yearHigh), '年初来安値': numberOrBlank_(input.yearLow),
-    '取得日時': input.quotedAt ? new Date(input.quotedAt) : '', '備考': clean_(input.notes)
+    '取得日時': input.quotedAt ? new Date(input.quotedAt) : '', '備考': clean_(input.notes),
+    '利確目標': numberListForCell_(input.takeProfitTargets), '決算情報': clean_(input.earningsData),
+    '決算取得日時': input.earningsFetchedAt ? new Date(input.earningsFetchedAt) : ''
   });
   return { ok: true };
 }
@@ -114,6 +116,41 @@ function fetchMarketData(symbol) {
     currentPrice: meta.regularMarketPrice || lastFinite_(quote.close), yearHigh: Math.max.apply(null, highs),
     yearLow: Math.min.apply(null, lows), quotedAt: new Date().toISOString()
   };
+}
+
+function fetchRecentEarnings(symbol) {
+  const ticker = normalizeTicker_(symbol);
+  if (!ticker) throw new Error('銘柄コードを入力してください。');
+  const end = Math.floor(Date.now() / 1000);
+  const start = end - 60 * 60 * 24 * 365 * 3;
+  const types = ['quarterlyDilutedEPS','quarterlyTotalRevenue','quarterlyNetIncome'];
+  const url = 'https://query1.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/' + encodeURIComponent(ticker) +
+    '?symbol=' + encodeURIComponent(ticker) + '&type=' + encodeURIComponent(types.join(',')) +
+    '&period1=' + start + '&period2=' + end + '&merge=false';
+  const response = UrlFetchApp.fetch(url, { muteHttpExceptions:true, headers:{'User-Agent':'Mozilla/5.0'} });
+  if (response.getResponseCode() !== 200) throw new Error('決算情報を取得できませんでした。時間をおいて再度お試しください。');
+  const json = JSON.parse(response.getContentText());
+  const results = json && json.timeseries && json.timeseries.result || [];
+  function latest_(type) {
+    const series = results.find(r => r.meta && r.meta.type && r.meta.type.indexOf(type) >= 0);
+    const rows = series && series[type] || [];
+    return rows.length ? rows[rows.length - 1] : null;
+  }
+  const eps = latest_('quarterlyDilutedEPS');
+  const revenue = latest_('quarterlyTotalRevenue');
+  const income = latest_('quarterlyNetIncome');
+  const latest = [eps,revenue,income].filter(Boolean).sort((a,b) => String(b.asOfDate||'').localeCompare(String(a.asOfDate||'')))[0];
+  if (!latest) throw new Error('直近の決算数値が見つかりません。');
+  return {
+    symbol:ticker, period:latest.asOfDate || '', epsActual:reportedValue_(eps),
+    epsEstimate:null, epsSurprisePercent:null, revenue:reportedValue_(revenue),
+    netIncome:reportedValue_(income), currency:(latest.currencyCode || ''),
+    nextEarningsDate:'', fetchedAt:new Date().toISOString()
+  };
+}
+
+function reportedValue_(row) {
+  return row && row.reportedValue ? rawValue_(row.reportedValue) : null;
 }
 
 function savePolicy(input) {
@@ -225,7 +262,7 @@ function getSalesForPurchase_(id) { return readObjects_('trades').map(mapTrade_)
 function getRemainingQuantity_(id) { const p=findTrade_(id); return Number(p.quantity)-getSalesForPurchase_(id).reduce((s,t)=>s+Number(t.quantity),0); }
 
 function mapTrade_(o) { return { id:String(o.ID),type:String(o['種別']),date:toDateString_(o['日付']),symbol:String(o['銘柄コード']||''),name:String(o['銘柄名']||''),quantity:Number(o['数量']||0),price:Number(o['単価']||0),averagePrice:Number(o['平均取得単価']||0),targetPrice:numberOrNull_(o['利確目標']),purchaseId:String(o['売却元ID']||''),profit:numberOrNull_(o['実現損益']),notes:String(o['備考']||''),updatedAt:toIso_(o['更新日時'])}; }
-function mapStock_(o) { return { id:String(o.ID),symbol:String(o['銘柄コード']||''),name:String(o['銘柄名']||''),buyTarget:numberOrNull_(o['購入目標値']),currentPrice:numberOrNull_(o['現在値']),yearHigh:numberOrNull_(o['年初来高値']),yearLow:numberOrNull_(o['年初来安値']),quotedAt:toIso_(o['取得日時']),notes:String(o['備考']||''),updatedAt:toIso_(o['更新日時'])}; }
+function mapStock_(o) { return { id:String(o.ID),symbol:String(o['銘柄コード']||''),name:String(o['銘柄名']||''),buyTargets:numberListFromCell_(o['購入目標値']),takeProfitTargets:numberListFromCell_(o['利確目標']),currentPrice:numberOrNull_(o['現在値']),yearHigh:numberOrNull_(o['年初来高値']),yearLow:numberOrNull_(o['年初来安値']),quotedAt:toIso_(o['取得日時']),earningsData:jsonObjectOrNull_(o['決算情報']),earningsFetchedAt:toIso_(o['決算取得日時']),notes:String(o['備考']||''),updatedAt:toIso_(o['更新日時'])}; }
 function mapPolicy_(o) { return { id:String(o.ID),date:toDateString_(o['日付']),rule:String(o['鉄のおきて']||''),pinned:o['常に上位']===true||String(o['常に上位']).toLowerCase()==='true',updatedAt:toIso_(o['更新日時'])}; }
 function mapFavorite_(o) { return { id:String(o.ID),symbol:String(o['銘柄コード']||''),name:String(o['銘柄名']||''),market:String(o['市場']||''),sector:String(o['業種']||''),thesis:String(o['投資理由']||''),catalyst:String(o['注目材料']||''),risk:String(o['リスク']||''),targetPrice:numberOrNull_(o['目標株価']),notes:String(o['メモ']||''),updatedAt:toIso_(o['更新日時'])}; }
 
@@ -233,6 +270,10 @@ function validateRequired_(obj, fields) { fields.forEach(k => { if (obj[k] === u
 function positiveNumber_(v,label) { const n=Number(v); if(!isFinite(n)||n<=0) throw new Error(label+'は0より大きい数値を入力してください。'); return n; }
 function numberOrBlank_(v) { return v === '' || v === null || v === undefined ? '' : Number(v); }
 function numberOrNull_(v) { return v === '' || v === null || v === undefined ? null : Number(v); }
+function numberListForCell_(v) { const values=Array.isArray(v)?v:String(v||'').split(','); const nums=values.map(Number).filter(n=>isFinite(n)&&n>0); return nums.length?JSON.stringify(nums):''; }
+function numberListFromCell_(v) { if(v===''||v===null||v===undefined)return []; try{const a=JSON.parse(String(v));if(Array.isArray(a))return a.map(Number).filter(n=>isFinite(n)&&n>0)}catch(e){} const n=Number(v);return isFinite(n)&&n>0?[n]:[]; }
+function jsonObjectOrNull_(v) { if(!v)return null; try{const o=JSON.parse(String(v));return o&&typeof o==='object'?o:null}catch(e){return null} }
+function rawValue_(v) { return v&&typeof v==='object'&&Object.prototype.hasOwnProperty.call(v,'raw')?v.raw:(v===undefined?null:v); }
 function clean_(v) { return String(v == null ? '' : v).trim(); }
 function dateValue_(v) { const d=new Date(v+'T00:00:00'); if(isNaN(d)) throw new Error('日付が不正です。'); return d; }
 function toDateString_(v) { if(!v)return ''; const d=v instanceof Date?v:new Date(v); return Utilities.formatDate(d,Session.getScriptTimeZone(),'yyyy-MM-dd'); }
