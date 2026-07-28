@@ -5,7 +5,8 @@ const APP = Object.freeze({
     trades: { name: 'Trades', headers: ['ID','種別','日付','銘柄コード','銘柄名','数量','単価','平均取得単価','利確目標','売却元ID','実現損益','備考','作成日時','更新日時'] },
     stocks: { name: 'Stocks', headers: ['ID','銘柄コード','銘柄名','購入目標値','現在値','年初来高値','年初来安値','取得日時','備考','作成日時','更新日時','利確目標','決算情報','決算取得日時'] },
     policies: { name: 'Policies', headers: ['ID','日付','鉄のおきて','常に上位','作成日時','更新日時'] },
-    favorites: { name: 'Favorites', headers: ['ID','銘柄コード','銘柄名','市場','業種','投資理由','注目材料','リスク','目標株価','メモ','作成日時','更新日時'] }
+    favorites: { name: 'Favorites', headers: ['ID','銘柄コード','銘柄名','市場','業種','投資理由','注目材料','リスク','目標株価','メモ','作成日時','更新日時'] },
+    assets: { name: 'Assets', headers: ['ID','基準日','証券会社','現金残高','保有商品評価額','その他資産','負債','純資産','備考','作成日時','更新日時'] }
   }
 });
 
@@ -169,8 +170,27 @@ function saveFavorite(input) {
   return { ok: true };
 }
 
+function saveAsset(input) {
+  validateRequired_(input, ['date','broker']);
+  const date = toDateString_(dateValue_(input.date));
+  const broker = clean_(input.broker);
+  const duplicate = readObjects_('assets').map(mapAsset_).find(a => a.date === date && a.broker.toLowerCase() === broker.toLowerCase() && a.id !== String(input.id || ''));
+  if (duplicate) throw new Error('同じ基準日・証券会社の記録がすでにあります。既存記録を編集してください。');
+  const cash = nonNegativeNumber_(input.cash, '現金残高');
+  const securities = nonNegativeNumber_(input.securities, '保有商品評価額');
+  const otherAssets = nonNegativeNumber_(input.otherAssets, 'その他資産');
+  const liabilities = nonNegativeNumber_(input.liabilities, '負債');
+  const netAssets = Math.round((cash + securities + otherAssets - liabilities) * 100) / 100;
+  upsert_('assets', input.id, {
+    '基準日': dateValue_(input.date), '証券会社': broker,
+    '現金残高': cash, '保有商品評価額': securities, 'その他資産': otherAssets,
+    '負債': liabilities, '純資産': netAssets, '備考': clean_(input.notes)
+  });
+  return { ok:true, netAssets:netAssets };
+}
+
 function deleteRecord(type, id) {
-  if (!['stocks','policies','favorites'].includes(type)) throw new Error('削除対象が不正です。');
+  if (!['stocks','policies','favorites','assets'].includes(type)) throw new Error('削除対象が不正です。');
   deleteRowById_(type, id);
   return { ok: true };
 }
@@ -188,6 +208,7 @@ function getAllData_() {
   return {
     trades: trades.sort(sortDateDesc_), purchases: purchases.sort(sortDateDesc_), openPurchases: purchases.filter(p => p.remainingQuantity > 0),
     stocks: readObjects_('stocks').map(mapStock_).sort(sortUpdatedDesc_),
+    assets: readObjects_('assets').map(mapAsset_).sort(sortDateDesc_),
     policies: readObjects_('policies').map(mapPolicy_).sort((a,b) => Number(b.pinned)-Number(a.pinned) || sortDateDesc_(a,b)),
     favorites: readObjects_('favorites').map(mapFavorite_).sort(sortUpdatedDesc_),
     summary: { realizedProfit: realized, openCost: invested, tradeCount: trades.length, winRate: sales.length ? Math.round(wins / sales.length * 1000) / 10 : 0 }
@@ -263,11 +284,13 @@ function getRemainingQuantity_(id) { const p=findTrade_(id); return Number(p.qua
 
 function mapTrade_(o) { return { id:String(o.ID),type:String(o['種別']),date:toDateString_(o['日付']),symbol:String(o['銘柄コード']||''),name:String(o['銘柄名']||''),quantity:Number(o['数量']||0),price:Number(o['単価']||0),averagePrice:Number(o['平均取得単価']||0),targetPrice:numberOrNull_(o['利確目標']),purchaseId:String(o['売却元ID']||''),profit:numberOrNull_(o['実現損益']),notes:String(o['備考']||''),updatedAt:toIso_(o['更新日時'])}; }
 function mapStock_(o) { return { id:String(o.ID),symbol:String(o['銘柄コード']||''),name:String(o['銘柄名']||''),buyTargets:numberListFromCell_(o['購入目標値']),takeProfitTargets:numberListFromCell_(o['利確目標']),currentPrice:numberOrNull_(o['現在値']),yearHigh:numberOrNull_(o['年初来高値']),yearLow:numberOrNull_(o['年初来安値']),quotedAt:toIso_(o['取得日時']),earningsData:jsonObjectOrNull_(o['決算情報']),earningsFetchedAt:toIso_(o['決算取得日時']),notes:String(o['備考']||''),updatedAt:toIso_(o['更新日時'])}; }
+function mapAsset_(o) { return { id:String(o.ID),date:toDateString_(o['基準日']),broker:String(o['証券会社']||''),cash:Number(o['現金残高']||0),securities:Number(o['保有商品評価額']||0),otherAssets:Number(o['その他資産']||0),liabilities:Number(o['負債']||0),netAssets:Number(o['純資産']||0),notes:String(o['備考']||''),updatedAt:toIso_(o['更新日時'])}; }
 function mapPolicy_(o) { return { id:String(o.ID),date:toDateString_(o['日付']),rule:String(o['鉄のおきて']||''),pinned:o['常に上位']===true||String(o['常に上位']).toLowerCase()==='true',updatedAt:toIso_(o['更新日時'])}; }
 function mapFavorite_(o) { return { id:String(o.ID),symbol:String(o['銘柄コード']||''),name:String(o['銘柄名']||''),market:String(o['市場']||''),sector:String(o['業種']||''),thesis:String(o['投資理由']||''),catalyst:String(o['注目材料']||''),risk:String(o['リスク']||''),targetPrice:numberOrNull_(o['目標株価']),notes:String(o['メモ']||''),updatedAt:toIso_(o['更新日時'])}; }
 
 function validateRequired_(obj, fields) { fields.forEach(k => { if (obj[k] === undefined || obj[k] === null || String(obj[k]).trim() === '') throw new Error('必須項目を入力してください。'); }); }
 function positiveNumber_(v,label) { const n=Number(v); if(!isFinite(n)||n<=0) throw new Error(label+'は0より大きい数値を入力してください。'); return n; }
+function nonNegativeNumber_(v,label) { if(v===''||v===null||v===undefined)return 0; const n=Number(v);if(!isFinite(n)||n<0)throw new Error(label+'は0以上の数値を入力してください。');return n; }
 function numberOrBlank_(v) { return v === '' || v === null || v === undefined ? '' : Number(v); }
 function numberOrNull_(v) { return v === '' || v === null || v === undefined ? null : Number(v); }
 function numberListForCell_(v) { const values=Array.isArray(v)?v:String(v||'').split(','); const nums=values.map(Number).filter(n=>isFinite(n)&&n>0); return nums.length?JSON.stringify(nums):''; }
